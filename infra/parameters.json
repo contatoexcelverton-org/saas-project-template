@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "projectName": {
+      "value": "SUBSTITUIR-PELO-NOME-DO-PROJETO"
+    },
+    "environment": {
+      "value": "production"
+    },
+    "location": {
+      "value": "brazilsouth"
+    },
+    "postgresSkuName": {
+      "value": "Standard_B1ms"
+    }
+  }
+}

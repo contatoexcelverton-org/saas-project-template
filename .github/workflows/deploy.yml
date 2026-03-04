@@ -1,0 +1,75 @@
+name: Deploy — Azure Functions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Necessário para OIDC
+  contents: read
+
+jobs:
+  test-before-deploy:
+    name: Testes obrigatórios antes do deploy
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy para Azure
+    runs-on: ubuntu-latest
+    needs: test-before-deploy   # Nunca faz deploy se os testes falharem
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login Azure via OIDC (sem client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: |
+          cd backend
+          pip install -r requirements.txt --target .python_packages/lib/site-packages
+
+      - name: Build e zip do pacote
+        run: |
+          cd backend
+          zip -r ../deploy.zip . -x "tests/*" -x ".venv/*" -x "__pycache__/*"
+
+      - name: Deploy para Azure Functions
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
+          package: ./deploy.zip
+
+      - name: Verificar saúde pós-deploy
+        run: |
+          sleep 30
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://${{ vars.AZURE_FUNCTION_APP_NAME }}.azurewebsites.net/api/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check falhou: HTTP $STATUS"
+            exit 1
+          fi
+          echo "Deploy ok — HTTP $STATUS"
+
+      - name: Rollback automático se health check falhar
+        if: failure()
+        run: |
+          echo "Deploy falhou — executando rollback"
+          az functionapp deployment slot swap \
+            --name ${{ vars.AZURE_FUNCTION_APP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --slot staging \
+            --target-slot production \
+            || echo "Rollback via slot não disponível — verificar manualmente"
