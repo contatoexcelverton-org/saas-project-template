@@ -1,0 +1,162 @@
+name: Preview — Deploy por PR
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write      # OIDC para Azure
+  contents: read
+  pull-requests: write # Comentar URL de preview no PR
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Testes obrigatórios antes de qualquer deploy
+  # --------------------------------------------------------------------------
+  test:
+    name: Testes obrigatórios
+    uses: ./.github/workflows/ci.yml
+
+  # --------------------------------------------------------------------------
+  # 2. Deploy para slot de preview (requer Azure Functions Premium/Dedicated)
+  # --------------------------------------------------------------------------
+  preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    needs: test
+    environment: preview
+    # Só roda se a variável AZURE_FUNCTION_APP_NAME estiver configurada no repo
+    if: vars.AZURE_FUNCTION_APP_NAME != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: |
+          cd backend
+          pip install -r requirements.txt --target .python_packages/lib/site-packages
+
+      - name: Build e zip do pacote
+        run: |
+          cd backend
+          zip -r ../deploy-preview.zip . \
+            -x "tests/*" -x ".venv/*" -x "__pycache__/*"
+
+      - name: Criar slot de preview (se não existir)
+        run: |
+          SLOT_NAME="pr-${{ github.event.number }}"
+          az functionapp deployment slot create \
+            --name ${{ vars.AZURE_FUNCTION_APP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --slot "$SLOT_NAME" \
+            --configuration-source production \
+            2>/dev/null || echo "Slot já existe"
+          echo "PREVIEW_SLOT=$SLOT_NAME" >> $GITHUB_ENV
+          echo "PREVIEW_URL=https://${{ vars.AZURE_FUNCTION_APP_NAME }}-${SLOT_NAME}.azurewebsites.net" >> $GITHUB_ENV
+
+      - name: Deploy para slot de preview
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
+          slot-name: ${{ env.PREVIEW_SLOT }}
+          package: ./deploy-preview.zip
+
+      - name: Aguardar app inicializar
+        run: sleep 20
+
+      - name: Smoke test do preview
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ env.PREVIEW_URL }}/api/health")
+          echo "Health check retornou: HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "❌ Preview não está saudável"
+            exit 1
+          fi
+
+      - name: Comentar URL de preview no PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const previewUrl = process.env.PREVIEW_URL;
+            const healthUrl = `${previewUrl}/api/health`;
+            const body = [
+              `## 🚀 Preview disponível`,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| **URL** | ${previewUrl} |`,
+              `| **Health check** | [${healthUrl}](${healthUrl}) |`,
+              `| **PR** | #${{ github.event.number }} |`,
+              `| **Commit** | ${{ github.sha }} |`,
+              ``,
+              `> ✅ Testes passando. Valide apenas a feature pedida — o restante é garantido pelos testes de regressão.`,
+              ``,
+              `Após validar, faça merge para \`main\` para deploy em produção.`,
+            ].join('\n');
+
+            // Atualiza comentário existente ou cria novo
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.includes('Preview disponível')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+        env:
+          PREVIEW_URL: ${{ env.PREVIEW_URL }}
+
+  # --------------------------------------------------------------------------
+  # 3. Limpar slot ao fechar/mergear PR
+  # --------------------------------------------------------------------------
+  cleanup:
+    name: Limpar slot de preview
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed' && vars.AZURE_FUNCTION_APP_NAME != ''
+    steps:
+      - name: Login Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Remover slot de preview
+        run: |
+          SLOT_NAME="pr-${{ github.event.number }}"
+          az functionapp deployment slot delete \
+            --name ${{ vars.AZURE_FUNCTION_APP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --slot "$SLOT_NAME" \
+            2>/dev/null || echo "Slot não encontrado ou já removido"
+          echo "Slot $SLOT_NAME removido"

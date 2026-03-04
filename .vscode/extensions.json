@@ -1,0 +1,42 @@
+{
+  "recommendations": [
+    // Copilot — agente principal de desenvolvimento
+    "github.copilot",
+    "github.copilot-chat",
+
+    // Python (backend Azure Functions)
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.black-formatter",
+    "ms-python.isort",
+    "ms-toolsai.jupyter",
+
+    // Azure Functions
+    "ms-azuretools.vscode-azurefunctions",
+    "ms-azuretools.vscode-azureresourcegroups",
+    "ms-azuretools.vscode-bicep",
+
+    // GitHub
+    "github.vscode-pull-request-github",
+    "eamodio.gitlens",
+
+    // PHP (frontend)
+    "bmewburn.vscode-intelephense-client",
+
+    // Testes
+    "hbenl.vscode-test-explorer",
+    "littlefoxteam.vscode-python-test-adapter",
+
+    // Qualidade e segurança
+    "trunk.io",
+    "streetsidesoftware.code-spell-checker",
+    "streetsidesoftware.code-spell-checker-portuguese-brazilian",
+
+    // Docker e containers
+    "ms-azuretools.vscode-docker",
+    "ms-vscode-remote.remote-containers",
+
+    // REST / API testing
+    "humao.rest-client"
+  ]
+}

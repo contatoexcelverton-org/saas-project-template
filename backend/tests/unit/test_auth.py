@@ -8,7 +8,7 @@ import time
 import pytest
 
 os.environ.setdefault("JWT_ALGORITHM", "HS256")
-os.environ.setdefault("JWT_SECRET_FALLBACK", "test-secret-unit")
+os.environ.setdefault("JWT_SECRET_FALLBACK", "test-secret-unit-do-not-use-in-production-ok")
 os.environ.setdefault("JWT_ACCESS_EXPIRE_MINUTES", "60")
 os.environ.setdefault("JWT_REFRESH_EXPIRE_DAYS", "7")
 
