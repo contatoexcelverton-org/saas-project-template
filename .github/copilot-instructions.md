@@ -15,7 +15,7 @@ Seu trabalho só está concluído quando: **código implementado + testes passan
 - **Multi-tenancy**: Schema por tenant (nunca misture dados entre tenants no mesmo schema)
 - **Autenticação**: Email + código OTP por email OU Entra External ID (OAuth Google/Microsoft)
 - **Pagamentos**: Stripe (internacional) + Mercado Pago (Brasil/PIX) — ambos simultâneos
-- **IA / Agentes**: Azure OpenAI (GPT-4o por padrão) + Azure AI Search (RAG)
+- **IA / Agentes**: Azure OpenAI + Azure AI Search (RAG) — **NUNCA** hardcode o nome do deployment. Sempre use a variável `AZURE_OPENAI_DEPLOYMENT` com fallback chain interna. O deployment disponível depende do recurso provisionado (verificar no Azure Portal antes de implementar).
 - **Mensageria / Chatbot**: Telegram Bot API e/ou Azure Communication Services (WhatsApp)
 - **Armazenamento**: Azure Blob Storage
 - **Fala**: Azure Speech Services (STT e TTS)
@@ -94,6 +94,9 @@ Estes fluxos **nunca** podem quebrar por nenhuma alteração:
 - **Login** (OTP validado, JWT access + refresh emitidos)
 - **Expiração de token** (access expira em 1h, refresh em 7d)
 - **Token adulterado** (deve lançar ValueError)
+- **Re-cadastro com email não verificado** (UPDATE sobrescreve registro, novo OTP enviado)
+- **Re-cadastro com email já verificado** (409 rejeitado)
+- **Mesmo CPF em emails diferentes** (permitido — CPF não é chave única)
 - **Criação de customer Stripe** (retorna customer_id)
 - **Criação de assinatura Stripe** (retorna subscription_id + client_secret)
 - **Validação de webhook Stripe** (assinatura válida aceita, inválida rejeita)
@@ -118,20 +121,25 @@ testes unitários → regressão → integração → cobertura ≥ 80% → depl
 
 ### Para qualquer tarefa (nova feature, alteração, correção):
 1. **Leia** `README.md` e `CHANGELOG.md` (se existir) para entender o contexto
-2. **Execute os testes existentes ANTES** de qualquer mudança:
+2. **Valide o alinhamento código ↔ infra** antes de implementar:
+   - [ ] O deployment Azure OpenAI existe no recurso provisionado?
+   - [ ] Constraints do banco (UNIQUE, NOT NULL) refletem as regras de negócio?
+   - [ ] Variáveis de ambiente no `.env.example` estão atualizadas?
+   - [ ] O método de deploy no CI está correto?
+3. **Execute os testes existentes ANTES** de qualquer mudança:
    ```bash
    cd backend && pytest tests/ -v --tb=short 2>&1 | tail -20
    ```
    Se algum teste já estiver falhando, reporte e corrija antes de avançar.
 3. **Identifique** todos os módulos que serão tocados
-4. **Escreva os novos testes** para a feature/alteração pedida
-5. **Implemente** o código
-6. **Execute todos os testes** novamente — incluindo regressão:
+5. **Escreva os novos testes** para a feature/alteração pedida
+6. **Implemente** o código
+7. **Execute todos os testes** novamente — incluindo regressão:
    ```bash
    cd backend && pytest tests/ -v --cov=services --cov-report=term-missing
    ```
-7. **Verifique** se não há credenciais no código (grep por 'sk_live', 'password=', etc.)
-8. **Só então** faça commit e informe o resultado ao usuário
+8. **Verifique** se não há credenciais no código (grep por 'sk_live', 'password=', etc.)
+9. **Só então** faça commit e informe o resultado ao usuário
 
 ### Para validação de deploy (preview):
 - Todo PR abre automaticamente uma URL de preview via `preview.yml`
@@ -158,14 +166,27 @@ Organize o trabalho em sub-agentes especializados quando a task for complexa:
 | `InfraAgent` | Provisiona recursos Azure via Bicep | `agents/infra_agent.py` |
 | `ReviewAgent` | Revisa código, detecta credenciais, valida padrões | `agents/review_agent.py` |
 
-Todos os agentes usam Azure OpenAI (GPT-4o) via Key Vault. Instrumente com Application Insights.
+Todos os agentes usam Azure OpenAI via Key Vault (deployment via `AZURE_OPENAI_DEPLOYMENT`). Instrumente com Application Insights.
 
 ---
 
 ## Padrão de autenticação
+
+### Fluxo de registro
+1. Valida: email, senha (≥6 chars), nome completo (≥2 palavras), CPF (algorítmico), data de nascimento (13–120 anos)
+2. Checa email no banco:
+   - Existe + **verificado** → `409 Conflict` — "Email já registrado"
+   - Existe + **NÃO verificado** → `UPDATE` (permite re-cadastro com novos dados)
+   - Não existe → `INSERT`
+3. Gera OTP 6 dígitos, salva hash, envia por email
+4. Verificação OTP → marca `email_verified = TRUE`, emite JWT access + refresh
+
+### Regra de re-cadastro
+Enquanto `email_verified = FALSE`, o registro **pode ser sobrescrito**.
+O usuário pode errar o email, fechar o browser ou esquecer o OTP — o sistema deve aceitar uma nova tentativa sem fricção.
+
 ```python
 # backend/services/auth.py
-# OTP flow: gera código 6 dígitos -> envia por email (Azure Communication Services) -> valida e emite JWT
 # JWT: assimétrico (RS256), expiração 1h access + 7d refresh
 # Key Vault: segredo JWT_PRIVATE_KEY e JWT_PUBLIC_KEY armazenados no KV
 ```
@@ -188,9 +209,71 @@ Todos os agentes usam Azure OpenAI (GPT-4o) via Key Vault. Instrumente com Appli
 # backend/agents/
 # Cada agente é especialista em um domínio
 # Sempre usa Azure OpenAI (endpoint e key via Key Vault)
+# Deployment: NUNCA hardcode — usar AZURE_OPENAI_DEPLOYMENT com fallback chain
 # RAG: Azure AI Search como retriever
 # Instrumentar TODAS as chamadas LLM com Application Insights (tokens, latência, custo estimado)
 ```
+
+---
+
+## Padrão de resiliência — Azure OpenAI
+
+- Todo serviço de IA **DEVE** ter uma lista de fallback de deployments.
+- Usar `AZURE_OPENAI_DEPLOYMENT` como override via env var, com fallback chain interna.
+- Em `DeploymentNotFound` (HTTP 404), tentar o próximo deployment da chain.
+- Se **todos** falharem → retornar `503` (serviço indisponível), **nunca** `500`.
+- Logar qual deployment foi usado com sucesso para facilitar debug.
+
+```python
+# Exemplo de fallback chain — adapte ao que estiver provisionado no Azure Portal
+_FALLBACK_ORDER = [
+    os.environ.get("AZURE_OPENAI_DEPLOYMENT", ""),
+    "gpt-4.1-mini",
+    "gpt-4o-mini",
+]
+_FALLBACK_ORDER = [d for d in _FALLBACK_ORDER if d]  # remove vazios
+# Tenta cada um; se DeploymentNotFound (404), passa para o próximo
+```
+
+---
+
+## Regras de modelo de dados — não negociáveis
+
+### Chave única de identidade
+- A **única chave única** de um usuário é o **email**.
+- O email só fica "travado" (impede re-cadastro) **após** `email_verified = TRUE`.
+- Antes da verificação, o mesmo email pode ser sobrescrito (re-registration).
+
+### Campos de validação de identidade
+- **CPF** e **Data de nascimento** são campos de **validação apenas** — confirmam que é uma pessoa real.
+- **NUNCA** adicione constraint `UNIQUE` em CPF ou data de nascimento.
+- O mesmo CPF pode aparecer em múltiplos emails diferentes (são tentativas de cadastro distintas).
+
+### Regra geral de constraints
+- Toda constraint `UNIQUE` no banco deve refletir **exatamente** a regra de negócio.
+- Se a unicidade é condicional (ex: "só para verificados"), use **partial unique index**:
+  ```sql
+  CREATE UNIQUE INDEX users_email_verified_uidx
+    ON users (email) WHERE email_verified = TRUE;
+  ```
+- Nunca assuma que "campo de validação" = "chave única".
+
+---
+
+## Padrão de error handling HTTP
+
+| Código | Quando usar |
+|--------|-------------|
+| `400` | Validação de input (campo faltando, formato inválido, CPF inválido) |
+| `401` | Credencial errada (senha incorreta, token inválido/expirado) |
+| `403` | Email não verificado ou conta desativada |
+| `409` | Conflito de unicidade (email já verificado, tentativa de duplicata) |
+| `429` | Rate limit ou throttling do Azure OpenAI |
+| `500` | Erro inesperado de runtime (bug real) |
+| `503` | Serviço externo indisponível (OpenAI sem deployment, DB offline) |
+
+- **Nunca** retorne `500` para erros de configuração — use `503`.
+- **Sempre** logue o erro real no Application Insights **antes** de retornar a resposta.
 
 ---
 
@@ -226,8 +309,14 @@ cd backend && pytest tests/ -v -k "auth or payment or regression" \
 # Azure Functions local
 cd backend && func start
 
-# Deploy manual (emergência — preferir o CI/CD)
-az functionapp deployment source config-zip \
-  --resource-group rg-{PROJECT} --name {FUNCTION_APP_NAME} \
-  --src deploy.zip
+# Deploy manual — MÉTODO CORRETO (faz build remote, não fica stale)
+cd backend && func azure functionapp publish {FUNCTION_APP_NAME} --build remote --python
+
+# NUNCA usar os métodos abaixo — causam pacote stale:
+# ❌ WEBSITE_RUN_FROM_PACKAGE apontando para blob URL
+# ❌ az functionapp deployment source config-zip
+
+# Verificação pós-deploy
+curl https://{FUNCTION_APP_NAME}.azurewebsites.net/api/health
+# Esperado: {"status": "ok", "checks": {"postgres": "ok", "keyvault": "ok"}}
 ```

@@ -36,21 +36,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Instalar Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
       - name: Instalar dependências
         run: |
           cd backend
-          pip install -r requirements.txt --target .python_packages/lib/site-packages
+          pip install -r requirements.txt
 
-      - name: Build e zip do pacote
+      - name: Deploy para Azure Functions (build remote)
+        # Método correto: func publish --build remote
+        # NÃO usar zip/config-zip/WEBSITE_RUN_FROM_PACKAGE — causam pacote stale
         run: |
           cd backend
-          zip -r ../deploy.zip . -x "tests/*" -x ".venv/*" -x "__pycache__/*"
-
-      - name: Deploy para Azure Functions
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
-          package: ./deploy.zip
+          func azure functionapp publish ${{ vars.AZURE_FUNCTION_APP_NAME }} --build remote --python
 
       - name: Verificar saúde pós-deploy
         run: |

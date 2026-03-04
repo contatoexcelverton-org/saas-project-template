@@ -45,16 +45,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Instalar Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
       - name: Instalar dependências
         run: |
           cd backend
-          pip install -r requirements.txt --target .python_packages/lib/site-packages
-
-      - name: Build e zip do pacote
-        run: |
-          cd backend
-          zip -r ../deploy-preview.zip . \
-            -x "tests/*" -x ".venv/*" -x "__pycache__/*"
+          pip install -r requirements.txt
 
       - name: Criar slot de preview (se não existir)
         run: |
@@ -69,11 +66,13 @@ jobs:
           echo "PREVIEW_URL=https://${{ vars.AZURE_FUNCTION_APP_NAME }}-${SLOT_NAME}.azurewebsites.net" >> $GITHUB_ENV
 
       - name: Deploy para slot de preview
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
-          slot-name: ${{ env.PREVIEW_SLOT }}
-          package: ./deploy-preview.zip
+        # Método correto: func publish --build remote --slot
+        # NÃO usar zip — causa pacote stale
+        run: |
+          cd backend
+          func azure functionapp publish ${{ vars.AZURE_FUNCTION_APP_NAME }} \
+            --build remote --python \
+            --slot ${{ env.PREVIEW_SLOT }}
 
       - name: Aguardar app inicializar
         run: sleep 20
