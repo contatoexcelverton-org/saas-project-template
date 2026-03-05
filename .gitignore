@@ -4,8 +4,31 @@
 .env.*.local
 *.pem
 *.key
+*.p12
+*.pfx
 secrets.json
 local.settings.json
+
+# Pastas de segredos e credenciais
+secrets/
+**/secrets/
+certs/
+**/certs/
+
+# Arquivos de service account Google (JSON keys)
+google_sa.json
+service_account*.json
+**/service_account*.json
+*-sa.json
+
+# Arquivos temporários de scripts
+temp_*.json
+*_temp.json
+tmp_*.json
+
+# App Settings exportadas do Azure (podem conter refs KV ou valores reais)
+appsettings.json
+appsettings.*.json
 
 # Python
 __pycache__/
@@ -44,6 +67,12 @@ yarn-error.log
 # VS Code
 .vscode/settings.json
 .vscode/launch.json
+
+# Editor swap files
+*.swp
+*.swo
+*.swn
+*~
 
 # OS
 .DS_Store

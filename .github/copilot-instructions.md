@@ -45,9 +45,16 @@ Seu trabalho só está concluído quando: **código implementado + testes passan
 ├── frontend/
 │   ├── public/           # Entry points PHP
 │   └── assets/           # CSS, JS, imagens
+├── backend/
+│   ├── scripts/          # Scripts utilitários — SEMPRE importar de scripts/_base.py
+│   │   └── _base.py      # get_pg_dsn() e get_admin_token() seguros
 ├── infra/
-│   ├── main.bicep        # Infraestrutura Azure completa
-│   └── parameters.json   # Parâmetros por ambiente
+│   ├── main.bicep              # Infraestrutura Azure completa
+│   ├── parameters.json         # Parâmetros por ambiente
+│   ├── appsettings.template.json  # Referências KV para App Settings
+│   ├── setup_keyvault.sh       # Cria KV e popula secrets do .env
+│   ├── set_kv_settings.ps1     # Configura App Settings com refs KV
+│   └── validate_project.py     # Validação pós-setup (DNS, KV, PG, credenciais)
 ├── .github/
 │   ├── copilot-instructions.md  # ESTE ARQUIVO
 │   └── workflows/
@@ -71,6 +78,19 @@ Seu trabalho só está concluído quando: **código implementado + testes passan
 3. **Em produção, todas as variáveis sensíveis vêm do Key Vault** via referência nas App Settings do Azure Functions: `@Microsoft.KeyVault(SecretUri=https://kv-{project}.vault.azure.net/secrets/{name}/)`.
 4. **Managed Identity** deve ser usada para autenticar no Key Vault — nunca CLIENT_SECRET.
 5. **OIDC no GitHub Actions** — o workflow usa `azure/login@v2` com `client-id`, `tenant-id` e `subscription-id` como variáveis públicas (não secrets). O secret fica no Azure via Federated Credential.
+6. **`os.environ.get()` para segredos é proibido em qualquer arquivo fora de `services/config.py`**. Use sempre `from services.config import get_secret, get_secret_required`.
+7. **Fallback vazio obrigatório**: `os.environ.get("KEY", "")` — **NUNCA** `os.environ.get("KEY", "sk_live_...")`. Valor de fallback diferente de vazio é um secret hardcoded. Se o secret for obrigatório, use `get_secret_required()`.
+8. **Scripts em `backend/scripts/`** devem importar de `_base.py`. Nunca hardcode host, porta, senha ou token em scripts.
+
+### Arquitetura de Key Vault — dois níveis
+
+| Nível | Quando usar | Nomenclatura |
+|-------|-------------|-------------|
+| **KV Central** (`kv-excelverton`) | Secrets compartilhados entre projetos: Stripe Live, Google OAuth org, SendGrid master | Mantido pelo time de infra |
+| **KV por Projeto** (`kv-{projeto}`) | Secrets exclusivos do projeto: chaves de DB, JWT secret, MP access token do cliente | Criado em `infra/setup_keyvault.sh` |
+
+Regra: se o secret muda entre projetos → KV do projeto. Se é o mesmo para todos → KV central.
+Nunca copie o valor de um secret do KV central para o código — referencie diretamente.
 
 ---
 
@@ -213,6 +233,46 @@ O usuário pode errar o email, fechar o browser ou esquecer o OTP — o sistema 
 # RAG: Azure AI Search como retriever
 # Instrumentar TODAS as chamadas LLM com Application Insights (tokens, latência, custo estimado)
 ```
+
+---
+
+## Padrão defensivo de conexão com banco de dados
+
+**REGRA**: a variável `conn` deve ser declarada como `None` ANTES do `try`.
+Se `get_pg_connection()` falhar dentro do try sem o `conn = None` antes, o `finally`
+levantará `UnboundLocalError`, mascara o erro real e gera HTTP 500 com HTML do Azure.
+
+```python
+# ✅ CORRETO — conn = None antes do try
+def meu_endpoint(req):
+    conn = None
+    try:
+        conn = get_pg_connection()
+        # ... lógica ...
+        return json_response({"ok": True})
+    except psycopg2.OperationalError as e:
+        logger.error("DB indisponível: %s", e)
+        return json_response({"error": "servico_indisponivel"}, status=503)
+    except Exception as e:
+        logger.exception("Erro inesperado")
+        return json_response({"error": "erro_interno"}, status=500)
+    finally:
+        if conn:  # só devolve se a conexão foi criada
+            return_pg_connection(conn)
+
+# ❌ ERRADO — crash em finally se get_pg_connection() falhar
+def meu_endpoint_errado(req):
+    try:
+        conn = get_pg_connection()   # se falhar aqui...
+        # ...
+    finally:
+        return_pg_connection(conn)   # UnboundLocalError: 'conn' referenced before assignment
+```
+
+**Códigos de status de DB**:
+- Banco offline / timeout → `503`
+- Constraint violation (dados inválidos) → `400`
+- Erro inesperado → `500` (com log obrigatório)
 
 ---
 

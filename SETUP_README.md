@@ -159,3 +159,76 @@ Nenhuma credencial fica no código ou no GitHub.
 - Org: https://github.com/contatoexcelverton-org
 - Azure Portal: https://portal.azure.com
 - Copilot instructions: `.github/copilot-instructions.md`
+
+---
+
+## Checklist de Custom Domain
+
+Execute este checklist **toda vez** que configurar um domínio personalizado em um projeto.
+Causa raiz de DNS_PROBE_FINISHED_NXDOMAIN em produção: qualquer etapa pulada abaixo.
+
+### Lado Azure
+
+- [ ] **Azure Static Web App ou Web App** — vá em "Custom domains" → "Add"
+  - [ ] Aguarde status mudar para **Ready** (pode levar 5 minutos)
+  - [ ] Anote o **CNAME value** gerado pelo Azure (ex: `nice-grass-abc123.azurestaticapps.net`)
+
+- [ ] **Certificado SSL** — o Azure emite automaticamente para Custom Domains em SWAs
+  - [ ] Aguarde status do certificado mudar para **Secured**
+
+- [ ] **Function App** (se o domínio aponta para a API) — vá em "Custom domains" → "Add binding"
+  - [ ] Tipo: CNAME
+  - [ ] Anote o valor do CNAME apontado pelo Azure
+
+### Lado Cloudflare
+
+- [ ] **DNS** — vá em dash.cloudflare.com → selecione o domínio → DNS
+
+  - [ ] Adicione registro **CNAME**:
+    ```
+    Tipo:  CNAME
+    Nome:  {subdomínio ou @}
+    Valor: {CNAME value fornecido pelo Azure}
+    TTL:   Auto (ou 1 hora)
+    Proxy: OFF (ícone laranja → cinza) ← CRÍTICO para Custom Domains Azure
+    ```
+    > ⚠️ **Proxy Cloudflare (modo laranja) deve estar DESATIVADO** para que o Azure
+    > consiga validar o domínio e emitir o certificado SSL. Depois que o Azure mostrar
+    > "Ready" + "Secured", você pode reativar o proxy se quiser CDN.
+
+  - [ ] Para domínio raiz (`@`), use registro **A** (não CNAME, pois RFC não permite CNAME em apex):
+    ```
+    Tipo:  A
+    Nome:  @
+    Valor: {IP do recurso Azure — obtenha via nslookup do hostname azurewebsites.net}
+    ```
+
+- [ ] **Aguarde propagação de DNS** — geralmente 1–5 minutos com Cloudflare, mas pode levar até 24h
+
+### Validação
+
+```bash
+# 1. Verifique se o DNS resolve
+nslookup meusite.com.br
+
+# 2. Verifique se o HTTPS funciona
+curl -I https://meusite.com.br
+
+# 3. Execute o script de validação do projeto
+python infra/validate_project.py
+
+# 4. Se o projeto tiver testes de DNS, rode:
+cd backend && pytest tests/unit/test_dns_availability.py -v
+# (atualizar REQUIRED_DOMAINS no arquivo antes de rodar)
+```
+
+### Diagnóstico rápido
+
+| Sintoma | Causa provável | Solução |
+|---------|---------------|---------|
+| `DNS_PROBE_FINISHED_NXDOMAIN` | Registro CNAME ausente no Cloudflare | Adicione o CNAME |
+| `ERR_SSL_PROTOCOL_ERROR` | Certificado ainda sendo emitido | Aguarde 5 min + proxy OFF |
+| Custom Domain com status "Validating" | Proxy Cloudflare ativado | Desative o proxy (modo cinza) |
+| Site abre mas API retorna CORS error | Domínio não adicionado no Function App | Adicione Custom Domain no Function App também |
+| `nslookup` resolve mas `curl` falha | Proxy Cloudflare interceptando e redirecionando | Verifique regras de Page Rules / Redirect Rules |
+
