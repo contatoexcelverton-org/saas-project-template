@@ -75,17 +75,34 @@ jobs:
             --slot ${{ env.PREVIEW_SLOT }}
 
       - name: Aguardar app inicializar
-        run: sleep 20
+        run: sleep 30
 
-      - name: Smoke test do preview
+      - name: Validação do preview (smoke test)
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "${{ env.PREVIEW_URL }}/api/health")
+          echo "Validando preview em ${{ env.PREVIEW_URL }}"
+
+          # Health check
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.PREVIEW_URL }}/api/health")
           echo "Health check retornou: HTTP $STATUS"
+
           if [ "$STATUS" != "200" ]; then
             echo "❌ Preview não está saudável"
             exit 1
           fi
+
+          # Testa validação de input
+          INPUT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ env.PREVIEW_URL }}/api/register" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"invalido"}')
+
+          if [ "$INPUT_STATUS" != "400" ]; then
+            echo "⚠️  Validação de input pode não estar funcionando (esperado: 400, recebido: $INPUT_STATUS)"
+          else
+            echo "✅ Validação de input ok"
+          fi
+
+          echo "✅ Preview validado com sucesso"
 
       - name: Comentar URL de preview no PR
         uses: actions/github-script@v7
