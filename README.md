@@ -71,12 +71,25 @@ frontend/
   public/     # Entry points PHP
 infra/
   main.bicep  # Toda a infra Azure
+  setup_cloudflare.sh    # Automação DNS Cloudflare
+  post_deploy_validation.sh  # Smoke tests pós-deploy
+  validate_project.py    # Validação de configuração
 .github/
   copilot-instructions.md  # Instruções para o agente Copilot
   workflows/
     ci.yml      # Testes em todo PR
+    pre-deploy-validation.yml  # 5 gates de qualidade
+    preview.yml  # Deploy de preview por PR
     deploy.yml  # Deploy para Azure (main branch)
 ```
+
+## Guias e Documentação
+
+- **[AI_AGENT_DEV_GUIDE.md](AI_AGENT_DEV_GUIDE.md)** — Guia completo para desenvolvimento com agentes de IA (GitHub Copilot, Claude Code)
+- **[MONITORING_GUIDE.md](MONITORING_GUIDE.md)** — Observabilidade, dashboards, alertas e runbook de incidentes
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — Resolução de problemas comuns (desenvolvimento, deploy, DNS, pagamentos)
+- **[SETUP_README.md](SETUP_README.md)** — Configuração inicial do template e checklist de custom domains
+- **[.github/copilot-instructions.md](.github/copilot-instructions.md)** — Instruções arquiteturais para agentes de IA
 
 ## Agentes especializados
 > Documente aqui os agentes deste projeto, o que cada um faz e qual Azure AI Search index usa.
