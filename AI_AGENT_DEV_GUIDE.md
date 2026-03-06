@@ -337,6 +337,207 @@ chmod +x .git/hooks/pre-commit
 
 ---
 
+## 🔄 Loop de Iteração — Agente Local com CI/CD
+
+**NOVA FUNCIONALIDADE**: O agente local agora pode monitorar CI/CD e iterar automaticamente.
+
+### Fluxo Completo:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Agente implementa feature localmente                    │
+│    - Escreve testes primeiro (TDD)                          │
+│    - Implementa código                                       │
+│    - Valida padrões de segurança                           │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Testes locais                                            │
+│    cd backend && pytest tests/ -v                           │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Commit + Push                                            │
+│    git add . && git commit -m "..." && git push             │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. Monitorar CI/CD                                          │
+│    ./infra/monitor_ci_status.sh                             │
+│                                                              │
+│    Exit codes:                                              │
+│    - 0: Passou → continua                                   │
+│    - 1: Falhou → lê logs e volta para 2                    │
+│    - 2: Rodando → aguarda e checa novamente                │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Validar Preview (se disponível)                         │
+│    - URL: https://{app}-pr{num}.azurewebsites.net          │
+│    - Testa cadastro + OTP                                   │
+│    - Testa pagamento Mercado Pago                           │
+│    - Valida chatbot (se aplicável)                         │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. Checklist de Aceitação                                  │
+│    - Email é chave única? ✓                                 │
+│    - Credenciais no Key Vault? ✓                            │
+│    - GA4 configurado? ✓                                     │
+│    - Tudo funcional? ✓                                      │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 7. Informa usuário: PRONTO PARA PRODUÇÃO                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Script de Monitoramento:
+
+```bash
+# O agente executa após cada push
+./infra/monitor_ci_status.sh
+
+# Output exemplo:
+# ==========================================
+#   Monitor CI/CD — Branch: feature/new-payment
+# ==========================================
+#
+# Último commit: a3b5c7d
+#
+# Workflows encontrados:
+#   - CI — Testes e Qualidade: completed (success)
+#   - Pre-Deploy Validation: completed (success)
+#   - Agent Validation: completed (success)
+#
+# ✅ CI — Testes e Qualidade passou
+# ✅ Pre-Deploy Validation passou
+# ✅ Agent Validation passou
+#
+# ==========================================
+#   RESULTADO
+# ==========================================
+#
+# ✅ TODOS OS WORKFLOWS PASSARAM
+#
+# O agente pode prosseguir para o próximo passo
+```
+
+### Exemplo de Iteração Automática:
+
+```python
+# Pseudocódigo do que o agente deve fazer
+
+def implement_feature(feature_request):
+    while True:
+        # 1. Implementa
+        write_tests(feature_request)
+        write_code(feature_request)
+
+        # 2. Testa localmente
+        result = run_tests_local()
+        if not result.passed:
+            fix_failing_tests()
+            continue
+
+        # 3. Commit + push
+        git_commit_and_push()
+
+        # 4. Monitora CI/CD
+        ci_status = monitor_ci_status()
+
+        if ci_status == "running":
+            sleep(60)  # Aguarda 1 minuto
+            continue
+
+        if ci_status == "failed":
+            logs = get_failure_logs()
+            analyze_and_fix(logs)
+            continue
+
+        # 5. CI passou — valida preview
+        if preview_available():
+            preview_status = test_preview_e2e()
+            if not preview_status.passed:
+                fix_preview_issues()
+                continue
+
+        # 6. Checklist de aceitação
+        checklist = validate_acceptance_criteria()
+        if not checklist.all_passed:
+            implement_missing_items(checklist.missing)
+            continue
+
+        # 7. Sucesso!
+        notify_user("✅ Feature completa e validada. Pronto para produção.")
+        break
+```
+
+### Checklist de Aceitação Automático:
+
+O workflow `agent-validation.yml` valida automaticamente:
+
+```yaml
+✅ Validações Locais:
+  - Testes de regressão
+  - Cobertura ≥80%
+  - Sem credenciais hardcoded
+  - Email é chave única
+
+✅ Preview E2E:
+  - Health check
+  - Endpoint de registro
+  - Endpoint de pagamento
+  - Key Vault conectado
+
+📋 Checklist Manual (agente verifica):
+  - [ ] Cadastro + OTP funcional no preview
+  - [ ] Mercado Pago PIX funciona (credenciais teste do KV)
+  - [ ] Chatbot envia/recebe (se aplicável)
+  - [ ] GA4 configurado
+```
+
+### Como o Agente USA o Monitor:
+
+No VS Code com Claude:
+
+```
+Usuário: "Implementa pagamento PIX com Mercado Pago"
+
+Claude: "Vou implementar. Seguindo o fluxo de iteração:
+
+1. ✅ Implementei testes em tests/unit/test_payment.py
+2. ✅ Implementei endpoint /api/create-pix
+3. ✅ Testes locais passando
+4. ✅ Commit + push realizado
+5. ⏳ Monitorando CI/CD...
+
+[Executa: ./infra/monitor_ci_status.sh]
+
+6. ❌ CI falhou — Gate 4: Secret acessado fora de config.py
+
+[Lê logs, identifica problema]
+
+7. ✅ Corrigi: importado get_secret_required()
+8. ✅ Testes locais passando novamente
+9. ✅ Commit + push da correção
+10. ⏳ Monitorando CI/CD novamente...
+
+[Executa: ./infra/monitor_ci_status.sh]
+
+11. ✅ Todos os workflows passaram
+12. ✅ Preview disponível em: https://app-pr123.azurewebsites.net
+13. 🧪 Testando preview...
+    - Health check: ✅
+    - Endpoint /api/create-pix: ✅ (retorna QR code)
+    - Webhook valida assinatura: ✅
+14. ✅ Checklist de aceitação completo
+
+PRONTO! Feature validada e funcional. Pode fazer merge."
+```
+
+---
+
 ## 📊 Monitoramento de Deploy — Validação Pós-Deploy
 
 ### Script de validação automática
