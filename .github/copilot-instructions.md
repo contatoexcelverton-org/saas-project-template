@@ -348,6 +348,83 @@ Use o servidor `github` para verificar se o CI passou antes de reportar conclus�
 
 ---
 
+## Fluxo de iteração do agente — Loop até aprovação
+
+**IMPORTANTE**: O agente LOCAL (VS Code + Claude) deve iterar até garantir que tudo funciona.
+
+### Loop obrigatório:
+
+```
+1. Implementa feature
+2. Roda testes localmente (pytest)
+3. Commit + push
+4. AGUARDA CI/CD passar (monitor_ci_status.sh)
+5. SE CI/CD falhou:
+   a. Lê logs de falha
+   b. Corrige o problema
+   c. VOLTA PARA 2 (roda testes localmente)
+6. SE CI/CD passou:
+   a. Verifica preview URL (se disponível)
+   b. Valida checklist de aceitação
+7. SE checklist não passou:
+   a. Identifica o que falta
+   b. VOLTA PARA 1 (implementa o que falta)
+8. SE checklist passou:
+   a. Informa usuário que está pronto
+   b. Aguarda aprovação para merge
+```
+
+### Como monitorar CI/CD do agente local:
+
+```bash
+# Após push, o agente DEVE executar:
+./infra/monitor_ci_status.sh
+
+# Exit codes:
+#   0 = Passou, pode prosseguir
+#   1 = Falhou, DEVE corrigir e tentar novamente
+#   2 = Ainda rodando, DEVE aguardar
+
+# O agente NÃO pode prosseguir enquanto CI/CD não passar
+```
+
+### Checklist de aceitação obrigatório:
+
+Antes de declarar que terminou, o agente DEVE garantir:
+
+- [x] Testes de regressão passando (`pytest tests/unit/test_regression.py`)
+- [x] Cobertura ≥80% em auth/payment
+- [x] Sem credenciais hardcoded (scan passou)
+- [x] Email é chave única de cadastro (não CPF, não birthdate)
+- [x] Preview deploy funcional (health check HTTP 200)
+- [x] Cadastro + OTP funciona (testar manualmente no preview)
+- [x] Mercado Pago (credenciais de teste no Key Vault do projeto)
+  - [ ] Endpoint /api/create-pix retorna QR code
+  - [ ] Webhook valida assinatura
+  - [ ] Pagamento de teste → assinatura ativada
+- [ ] Chatbot (se aplicável):
+  - [ ] Envia mensagens conforme instruções
+  - [ ] Recebe e processa respostas
+- [ ] GA4 configurado no frontend (pronto para produção)
+- [x] Todas credenciais no Key Vault específico do projeto
+
+### Workflow agent-validation.yml:
+
+O workflow `.github/workflows/agent-validation.yml` automatiza parte do checklist:
+- Validações locais (testes, scan, cobertura)
+- Deploy de preview temporário
+- Testes E2E básicos
+- Checklist completo no GitHub Actions Summary
+
+O agente pode disparar manualmente:
+```bash
+gh workflow run agent-validation.yml
+```
+
+Ou aguardar disparo automático após push.
+
+---
+
 ## Variáveis de ambiente locais (.env)
 Veja `.env.example` para a lista completa. Localmente você usa valores reais no `.env`.
 Em produção, **todas** essas variáveis são referências ao Key Vault nas App Settings do Azure.

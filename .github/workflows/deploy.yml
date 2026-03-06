@@ -10,9 +10,16 @@ permissions:
   contents: read
 
 jobs:
+  pre-deploy-validation:
+    name: Validação pre-deploy (gates de qualidade)
+    uses: ./.github/workflows/pre-deploy-validation.yml
+    with:
+      environment: production
+
   test-before-deploy:
     name: Testes obrigatórios antes do deploy
     uses: ./.github/workflows/ci.yml
+    needs: pre-deploy-validation
 
   deploy:
     name: Deploy para Azure
@@ -51,16 +58,13 @@ jobs:
           cd backend
           func azure functionapp publish ${{ vars.AZURE_FUNCTION_APP_NAME }} --build remote --python
 
-      - name: Verificar saúde pós-deploy
+      - name: Aguardar app inicializar (cold start)
+        run: sleep 45
+
+      - name: Validação pós-deploy (smoke tests)
         run: |
-          sleep 30
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://${{ vars.AZURE_FUNCTION_APP_NAME }}.azurewebsites.net/api/health")
-          if [ "$STATUS" != "200" ]; then
-            echo "Health check falhou: HTTP $STATUS"
-            exit 1
-          fi
-          echo "Deploy ok — HTTP $STATUS"
+          chmod +x infra/post_deploy_validation.sh
+          ./infra/post_deploy_validation.sh ${{ vars.AZURE_FUNCTION_APP_NAME }}
 
       - name: Rollback automático se health check falhar
         if: failure()

@@ -1,0 +1,266 @@
+name: Pre-Deploy Validation — Gate de Qualidade
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to validate'
+        required: true
+        type: string
+    outputs:
+      validation_passed:
+        description: 'Whether validation passed'
+        value: ${{ jobs.validate.outputs.passed }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Validação Pre-Deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.final_check.outputs.passed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Instalar dependências
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      # ========================================================================
+      # GATE 1 — Testes de regressão (fluxos críticos)
+      # ========================================================================
+      - name: Gate 1 — Regressão obrigatória
+        id: regression
+        run: |
+          cd backend
+          echo "::group::Testes de Regressão"
+          pytest tests/unit/test_regression.py -v --tb=short --maxfail=1
+          EXIT_CODE=$?
+          echo "::endgroup::"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ GATE 1 FALHOU — Testes de regressão quebraram"
+            echo "   Corrija antes de fazer deploy em ${{ inputs.environment }}"
+            exit 1
+          fi
+          echo "✅ Gate 1 passou — Todos os fluxos críticos funcionando"
+
+      # ========================================================================
+      # GATE 2 — Scan de credenciais hardcoded
+      # ========================================================================
+      - name: Gate 2 — Scan de credenciais
+        id: credentials
+        run: |
+          echo "::group::Scan de Credenciais"
+          set +e
+          FOUND=0
+
+          # Stripe live keys
+          if grep -rn --include="*.py" --include="*.js" --include="*.php" \
+            -E "(sk_live_|pk_live_)[a-zA-Z0-9]+" \
+            --exclude-dir={.venv,__pycache__,.git,node_modules} . ; then
+            FOUND=1
+          fi
+
+          # RSA keys
+          if grep -rn --include="*.py" --include="*.js" --include="*.php" \
+            "BEGIN PRIVATE KEY\|BEGIN RSA PRIVATE" \
+            --exclude-dir={.venv,__pycache__,.git,node_modules} . ; then
+            FOUND=1
+          fi
+
+          # Senhas hardcoded
+          if grep -rn --include="*.py" --include="*.js" --include="*.php" \
+            -E "password\s*=\s*['\"][^'\"]{4,}['\"]" \
+            --exclude-dir={.venv,__pycache__,.git,node_modules} \
+            --exclude="*.example" --exclude="conftest.py" . ; then
+            FOUND=1
+          fi
+
+          echo "::endgroup::"
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "❌ GATE 2 FALHOU — Credenciais hardcoded detectadas"
+            exit 1
+          fi
+          echo "✅ Gate 2 passou — Nenhuma credencial hardcoded"
+
+      # ========================================================================
+      # GATE 3 — Validação de código defensivo (conn = None)
+      # ========================================================================
+      - name: Gate 3 — Padrão defensivo de DB
+        id: defensive
+        run: |
+          echo "::group::Validação de Padrões Defensivos"
+          set +e
+          FOUND=0
+
+          # Procura por funções que usam psycopg2 mas não declaram conn = None antes do try
+          # Este é um padrão crítico documentado nas instruções do Copilot
+
+          echo "Verificando padrão 'conn = None' antes de try..."
+
+          # Procura arquivos com psycopg2 ou get_pg_connection
+          FILES=$(grep -rl --include="*.py" \
+            -E "(import psycopg2|from.*psycopg2|get_pg_connection)" \
+            --exclude-dir={.venv,__pycache__,.git,tests} backend/ || true)
+
+          for file in $FILES; do
+            # Verifica se há try/except sem conn = None antes
+            # Padrão simplificado: se tem get_pg_connection dentro de try mas não tem conn = None antes
+            if grep -Pzo "def [^\n]+:\n(?:.*\n)*?\s+try:\n(?:.*\n)*?\s+conn = get_pg_connection" "$file" > /dev/null 2>&1; then
+              # Verifica se tem 'conn = None' antes do try
+              if ! grep -Pzo "def [^\n]+:\n(?:.*\n)*?\s+conn = None\n(?:.*\n)*?\s+try:" "$file" > /dev/null 2>&1; then
+                echo "⚠️  $file pode não seguir o padrão defensivo (conn = None antes do try)"
+                FOUND=1
+              fi
+            fi
+          done
+
+          echo "::endgroup::"
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "⚠️  GATE 3 AVISO — Revise o padrão defensivo de DB"
+            echo "   Padrão obrigatório: 'conn = None' ANTES do 'try'"
+            # Não falha o gate, apenas avisa
+          else
+            echo "✅ Gate 3 passou — Padrão defensivo de DB ok"
+          fi
+
+      # ========================================================================
+      # GATE 4 — Validação de imports seguros (config.py)
+      # ========================================================================
+      - name: Gate 4 — Imports de segredos centralizados
+        id: safe_imports
+        run: |
+          echo "::group::Validação de Imports Seguros"
+          set +e
+          FOUND=0
+
+          # Procura por os.environ.get() fora de services/config.py e scripts/_base.py
+          echo "Verificando uso direto de os.environ.get() para secrets..."
+
+          # Lista arquivos Python (exceto config.py, _base.py, testes)
+          FILES=$(find backend -name "*.py" \
+            -not -path "*/tests/*" \
+            -not -path "*/.venv/*" \
+            -not -path "*/__pycache__/*" \
+            -not -path "*/services/config.py" \
+            -not -path "*/scripts/_base.py")
+
+          for file in $FILES; do
+            # Procura padrões suspeitos de secrets via os.environ
+            if grep -n -E "os\.environ\.get\(['\"]([A-Z_]+SECRET|[A-Z_]+KEY|[A-Z_]+TOKEN|[A-Z_]+PASSWORD)" "$file"; then
+              echo "⚠️  $file usa os.environ.get() para secret — deveria usar services.config"
+              FOUND=1
+            fi
+          done
+
+          echo "::endgroup::"
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "❌ GATE 4 FALHOU — Secrets acessados fora de services.config"
+            echo "   Use: from services.config import get_secret, get_secret_required"
+            exit 1
+          fi
+          echo "✅ Gate 4 passou — Secrets centralizados em config.py"
+
+      # ========================================================================
+      # GATE 5 — Cobertura mínima de testes críticos
+      # ========================================================================
+      - name: Gate 5 — Cobertura mínima (auth + payment)
+        id: coverage
+        run: |
+          cd backend
+          echo "::group::Cobertura de Testes"
+          pytest tests/ -v -k "auth or payment" \
+            --cov=services \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+          EXIT_CODE=$?
+          echo "::endgroup::"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ GATE 5 FALHOU — Cobertura abaixo de 80% em auth/payment"
+            exit 1
+          fi
+          echo "✅ Gate 5 passou — Cobertura ≥80% nos módulos críticos"
+
+      # ========================================================================
+      # CHECK FINAL — Todos os gates
+      # ========================================================================
+      - name: Resultado final da validação
+        id: final_check
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "RESULTADO DA VALIDAÇÃO PRE-DEPLOY"
+          echo "=========================================="
+          echo ""
+
+          GATES_PASSED=0
+          GATES_TOTAL=5
+
+          if [ "${{ steps.regression.outcome }}" == "success" ]; then
+            echo "✅ Gate 1 — Regressão"
+            ((GATES_PASSED++))
+          else
+            echo "❌ Gate 1 — Regressão FALHOU"
+          fi
+
+          if [ "${{ steps.credentials.outcome }}" == "success" ]; then
+            echo "✅ Gate 2 — Credenciais"
+            ((GATES_PASSED++))
+          else
+            echo "❌ Gate 2 — Credenciais FALHOU"
+          fi
+
+          if [ "${{ steps.defensive.outcome }}" == "success" ]; then
+            echo "✅ Gate 3 — Padrão defensivo"
+            ((GATES_PASSED++))
+          else
+            echo "⚠️  Gate 3 — Padrão defensivo COM AVISOS"
+            ((GATES_PASSED++))  # Não bloqueia
+          fi
+
+          if [ "${{ steps.safe_imports.outcome }}" == "success" ]; then
+            echo "✅ Gate 4 — Imports seguros"
+            ((GATES_PASSED++))
+          else
+            echo "❌ Gate 4 — Imports seguros FALHOU"
+          fi
+
+          if [ "${{ steps.coverage.outcome }}" == "success" ]; then
+            echo "✅ Gate 5 — Cobertura"
+            ((GATES_PASSED++))
+          else
+            echo "❌ Gate 5 — Cobertura FALHOU"
+          fi
+
+          echo ""
+          echo "Score: $GATES_PASSED/$GATES_TOTAL gates passaram"
+          echo ""
+
+          if [ $GATES_PASSED -eq $GATES_TOTAL ]; then
+            echo "✅ VALIDAÇÃO PASSOU — Deploy autorizado para ${{ inputs.environment }}"
+            echo "passed=true" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "❌ VALIDAÇÃO FALHOU — Corrija os erros antes do deploy"
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
